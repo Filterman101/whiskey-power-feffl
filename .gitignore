@@ -1,0 +1,5 @@
+.streamlit/secrets.toml
+.cbs_browser_profile/
+icon.png
+__pycache__/
+*.py[cod]
