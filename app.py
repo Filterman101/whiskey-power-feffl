@@ -313,9 +313,8 @@ class CBSFantasySync:
         merged["Vegas_Implied"] = merged.get("Vegas_Implied", pd.Series(21.5, index=merged.index)).fillna(21.5)
         merged["Proj_Pts"] = merged.get("Proj_Pts", merged["CBS_Proj"]).fillna(merged["CBS_Proj"]).round(1)
         merged["ROS_PPG"] = merged.get("ROS_PPG", merged["Proj_Pts"] * 0.96).fillna(merged["Proj_Pts"] * 0.96).round(1)
-        merged["Proj_Rec"] = merged.get("Proj_Rec", pd.Series(np.nan, index=merged.index)).fillna(
-            np.where(merged["Pos"].isin(["WR", "TE"]), 3.5, np.where(merged["Pos"] == "RB", 2.2, 0.0))
-        ).round(1)
+        default_rec = merged["Pos"].map({"WR": 3.5, "TE": 3.5, "RB": 2.2}).fillna(0.0)
+        merged["Proj_Rec"] = merged.get("Proj_Rec", pd.Series(np.nan, index=merged.index)).fillna(default_rec).round(1)
         merged["Floor"] = merged.get("Floor", merged["Proj_Pts"] * 0.62).fillna(merged["Proj_Pts"] * 0.62).round(1)
         merged["Ceiling"] = merged.get("Ceiling", merged["Proj_Pts"] * 1.48).fillna(merged["Proj_Pts"] * 1.48).round(1)
         merged["Snap_%"] = merged.get("Snap_%", pd.Series(65, index=merged.index)).fillna(65).astype(int)
@@ -411,8 +410,8 @@ strategy = st.sidebar.radio(
 lam = {"Balanced (Max EV)": 0.0, "Protect Lead (High Floor)": -0.35, "Chasing Points (High Ceiling)": 0.50}[strategy]
 
 with st.sidebar.expander("🔐 CBS Live League Sync", expanded=True):
-    cbs_league_id = st.text_input("CBS League ID", value=get_config_secret("CBS_LEAGUE_ID", "my-14team-ppr"))
-    cbs_team_id = st.text_input("Your CBS Team ID (1-14)", value=get_config_secret("CBS_TEAM_ID", "1"))
+    cbs_league_id = st.text_input("CBS League ID", value=get_config_secret("CBS_LEAGUE_ID", "feffl"))
+    cbs_team_id = st.text_input("Your CBS Team ID (1-14)", value=get_config_secret("CBS_TEAM_ID", "14"))
     manual_token = st.text_input("CBS Access Token (from Ctrl+U)", value=get_config_secret("CBS_SESS", ""), type="password")
 
     if st.button("🚀 Sync CBS League Now", use_container_width=True):
@@ -465,8 +464,8 @@ scarcity_mult = {"QB": 0.85, "RB": 1.22, "WR": 1.15, "TE": 1.10, "K": 0.50, "DEF
 
 df["Std_Dev"] = ((df["Ceiling"] - df["Floor"]) / 2.56).round(2)
 df["Opt_Score"] = (df["Proj_Pts"] + (lam * df["Std_Dev"])).round(2)
-df["VORP_14T"] = np.maximum(0.5, (df["ROS_PPG"] - df["Pos"].map(replacement_baseline)) * df["Pos"].map(scarcity_mult)).round(2)
-df["Playoff_VORP_14T"] = np.maximum(0.5, (df["Playoff_PPG"] - df["Pos"].map(replacement_baseline)) * df["Pos"].map(scarcity_mult)).round(2)
+df["VORP_14T"] = np.maximum(0.5, (df["ROS_PPG"] - df["Pos"].map(replacement_baseline).fillna(8.0)) * df["Pos"].map(scarcity_mult).fillna(1.0)).round(2)
+df["Playoff_VORP_14T"] = np.maximum(0.5, (df["Playoff_PPG"] - df["Pos"].map(replacement_baseline).fillna(8.0)) * df["Pos"].map(scarcity_mult).fillna(1.0)).round(2)
 df["Effective_VORP"] = ((1.0 - playoff_weight) * df["VORP_14T"] + (playoff_weight * df["Playoff_VORP_14T"])).round(2)
 df["Trade_Value"] = ((df["Effective_VORP"] ** 1.28) * 2.5).round(1)
 
@@ -514,7 +513,6 @@ def optimize_lineup(roster_df: pd.DataFrame, score_col: str = "Opt_Score") -> pd
         out["Decision"] = "SIT"
         out.iloc[:min(9, len(out)), out.columns.get_loc("Decision")] = "START"
 
-    # Assign exact CBS lineup slots: QB, RB1, RB2, WR1, WR2, TE, FLEX, K, DEF
     out["Slot"] = out["Pos"]
     out["Slot_Order"] = 99
     starters_idx = out[out["Decision"] == "START"].sort_values(by=score_col, ascending=False).index
@@ -533,7 +531,6 @@ def optimize_lineup(roster_df: pd.DataFrame, score_col: str = "Opt_Score") -> pd
         out.loc[idx, "Slot"] = slot_name
         out.loc[idx, "Slot_Order"] = slot_rank_map.get(slot_name, 90)
 
-    # Sort bench in CBS position order (QB -> RB -> WR -> TE -> K -> DEF)
     bench_idx = out[out["Decision"] == "SIT"].index
     for idx in bench_idx:
         p = out.loc[idx, "Pos"]
@@ -600,13 +597,13 @@ with tab3:
     cl, cr = st.columns(2)
     skill_w = waivers_all[waivers_all["Pos"].isin(["QB", "RB", "WR", "TE"])]["Player"].tolist() or waivers_all["Player"].tolist()
     with cl:
-        target_w = st.selectbox("Select Waiver Target:", skill_w)
-        w_row = waivers_all[waivers_all["Player"] == target_w].iloc[0]
+        target_w = st.selectbox("Select Waiver Target:", skill_w) if skill_w else "None"
+        w_row = waivers_all[waivers_all["Player"] == target_w].iloc[0] if skill_w else df.iloc[0]
         def_idx = 0 if w_row["VORP_14T"] >= 5.5 else (1 if w_row["VORP_14T"] >= 3.2 else 2)
         t_choice = st.selectbox("Usage Tier:", ["League Winner / Bellcow Takeover (Base 60%)", "Every-Week PPR Starter / High Target Slot (Base 30%)", "Flex Depth / High-Ceiling Handcuff (Base 12%)", "1-Week Injury or Bye Streamer (Base 6%)"], index=def_idx)
         n_choice = st.select_slider("Positional Need:", options=["Luxury Stash (0.5x)", "Bench Depth (0.75x)", "Flex Upgrade (1.0x)", "Desperate Starter Hole (1.35x)"], value="Flex Upgrade (1.0x)")
-        drop_cand = st.selectbox("Drop Candidate:", bench["Player"].tolist() if not bench.empty else my_roster["Player"].tolist())
-        drop_row = my_roster[my_roster["Player"] == drop_cand].iloc[0]
+        drop_list = bench["Player"].tolist() if not bench.empty else my_roster["Player"].tolist()
+        drop_cand = st.selectbox("Drop Candidate:", drop_list) if drop_list else "None"
 
     t_pct = {"League Winner / Bellcow Takeover (Base 60%)": 0.60, "Every-Week PPR Starter / High Target Slot (Base 30%)": 0.30, "Flex Depth / High-Ceiling Handcuff (Base 12%)": 0.12, "1-Week Injury or Bye Streamer (Base 6%)": 0.06}[t_choice]
     n_mult = {"Luxury Stash (0.5x)": 0.50, "Bench Depth (0.75x)": 0.75, "Flex Upgrade (1.0x)": 1.00, "Desperate Starter Hole (1.35x)": 1.35}[n_choice]
@@ -638,10 +635,11 @@ with tab4:
     opp_pool = df[df["Status"] == "Opponent Roster"].copy()
     opp_sk = opp_pool["Player"].tolist()
     with tc1:
-        send_p = st.multiselect("📤 You Send:", my_sk, default=[p for p in ["Chase Brown", "Wan'Dale Robinson"] if p in my_sk][:2])
+        send_p = st.multiselect("📤 You Send:", my_sk, default=my_sk[:2] if len(my_sk) >= 2 else my_sk)
     with tc2:
-        recv_p = st.multiselect("📥 You Receive:", opp_sk, default=[p for p in ["Drake London", "Jahmyr Gibbs"] if p in opp_sk][:1])
+        recv_p = st.multiselect("📥 You Receive:", opp_sk, default=opp_sk[:1] if opp_sk else [])
 
+    reg_delta, po_delta = 0.0, 0.0
     if send_p and recv_p:
         s_df = my_roster[my_roster["Player"].isin(send_p)]
         r_df = opp_pool[opp_pool["Player"].isin(recv_p)]
@@ -688,5 +686,5 @@ Week {current_week} | Mode: {strategy} | FAAB: ${faab_rem}/${faab_start}
 Starters: {starters[['Slot', 'Pos', 'Player', 'Opp', 'Proj_Pts', 'Floor', 'Ceiling']].to_dict(orient='records')}
 Bench: {bench[['Pos', 'Player', 'Opp', 'Proj_Pts', 'ROS_PPG', 'Playoff_PPG']].to_dict(orient='records')}
 Waiver Target: {target_w} (Bid: ${rec_bid}, Drop: {drop_cand})
-Trade Eval: Send {send_p} for {recv_p} (Reg Δ: {reg_delta if (send_p and recv_p) else 0:+.2f} PPG, Playoff Δ: {po_delta if (send_p and recv_p) else 0:+.2f} PPG)"""
+Trade Eval: Send {send_p} for {recv_p} (Reg Δ: {reg_delta:+.2f} PPG, Playoff Δ: {po_delta:+.2f} PPG)"""
     st.code(prompt_text, language="markdown")
